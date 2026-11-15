@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#17132b">
+<title>Fairy lights controller</title>
+<style>
+:root{--bg:#17132b;--sf:#231d42;--bt:#352c60;--ink:#f4f0ff;--mu:#aaa3cc;--ac:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;padding:18px 16px 40px;background:var(--bg);color:var(--ink);font:16px/1.45 ui-rounded,"Segoe UI",system-ui,sans-serif;max-width:460px;margin-inline:auto}
+h1{font-size:22px;margin:4px 0 14px}
+h2{font-size:15px;margin:0 0 10px;color:var(--mu);font-weight:600}
+#glow{--c:hsl(40 100% 60%);display:flex;justify-content:space-between;margin:0 4px 20px}
+#glow i{width:18px;height:18px;border-radius:50%;background:var(--c);box-shadow:0 0 14px 4px var(--c);transition:background .08s}
+#glow i:nth-child(odd){transform:translateY(7px)}
+section{background:var(--sf);border-radius:16px;padding:14px;margin-bottom:12px}
+button{font:inherit;background:var(--bt);color:var(--ink);border:0;border-radius:12px;padding:13px;min-height:48px}
+button.go{background:var(--ac);color:#2a1f00;font-weight:600}
+button:focus-visible,input:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+.g{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.g3{grid-template-columns:repeat(3,1fr)}.g3 button{padding:12px 4px;font-size:15px}
+.w{width:100%;margin-top:8px}
+label{display:block;color:var(--mu);font-size:14px;margin-top:12px}
+input[type=range]{width:100%;accent-color:var(--ac)}
+input[type=color]{width:100%;height:48px;border:0;background:none;padding:0}
+input[type=text],input[type=number]{width:100%;padding:11px;border-radius:10px;border:1px solid var(--bt);background:var(--bg);color:var(--ink);font:inherit}
+#st{margin-left:8px;color:var(--mu)}
+#log{font:12px/1.4 ui-monospace,monospace;color:var(--mu);white-space:pre-wrap;min-height:3em}
+</style></head><body>
+<h1>Fairy lights</h1>
+<div id="glow"></div>
+
+<section><h2>Connection</h2>
+<button class="go" onclick="connect()">Connect</button><span id="st">Not connected</span>
+<label><input type="checkbox" id="all"> Show all Bluetooth devices</label>
+<label>Service ID (only if connecting fails)<input type="text" id="svc" placeholder="49535343-fe7d-4ae5-8fa9-9fafd205e455"></label>
+</section>
+
+<section><h2>Basics</h2>
+<div class="g"><button onclick="power(0)">Off</button><button onclick="power(1)">On</button></div>
+<label>Color (also used by Breathe)<input type="color" id="col" value="#ff3fa4"></label>
+<button class="w" onclick="setColor()">Set color</button>
+<label>Brightness<input type="range" id="bri" min="1" max="100" value="80"></label>
+</section>
+
+<section><h2>Custom animations</h2>
+<div class="g g3" id="anims"></div>
+<button class="w" onclick="halt()">Stop animation</button>
+<label>Speed<input type="range" id="spd" min="1" max="10" value="4"></label>
+</section>
+
+<section><h2>Built-in animations</h2>
+<label>Preset number<input type="number" id="pn" min="0" max="255" value="1"></label>
+<button class="w" onclick="preset()">Play preset</button>
+</section>
+
+<div id="log"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const CHAR='49535343-8841-43f4-a8d4-ecbe34729bb3',SVC='49535343-fe7d-4ae5-8fa9-9fafd205e455';
+let ch=null,run=0;
+$('glow').innerHTML='<i></i>'.repeat(12);
+const log=m=>{$('log').textContent=m};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const bri=()=>+$('bri').value*10;
+const halt=()=>{run++};
+
+function pkt(a){return new Uint8Array([...a,a.reduce((x,y)=>x+y,0)&255])}
+async function send(a){
+  if(!ch)throw Error('Not connected. Tap Connect first.');
+  const d=pkt(a);
+  if(ch.properties.writeWithoutResponse)await ch.writeValueWithoutResponse(d);
+  else await ch.writeValue(d);
+}
+async function hsv(h,s,v){
+  h=((Math.round(h)%360)+360)%360;s=Math.round(s);v=Math.max(10,Math.min(1000,Math.round(v)));
+  $('glow').style.setProperty('--c',`hsl(${h} ${s/10}% ${20+v/25}%)`);
+  await send([0xAA,3,7,1,h>>8,h&255,s>>8,s&255,v>>8,v&255]);
+}
+function hexHue(x){
+  const r=parseInt(x.slice(1,3),16)/255,g=parseInt(x.slice(3,5),16)/255,b=parseInt(x.slice(5,7),16)/255;
+  const mx=Math.max(r,g,b),d=mx-Math.min(r,g,b);let h=0;
+  if(d){h=mx==r?((g-b)/d)%6:mx==g?(b-r)/d+2:(r-g)/d+4;h*=60;if(h<0)h+=360}
+  return [h,mx?d/mx*1000:0];
+}
+
+async function connect(){
+  try{
+    if(!navigator.bluetooth)return log('Web Bluetooth is not available here. Open this page in Chrome on Android, over https.');
+    const svc=($('svc').value.trim()||SVC).toLowerCase();
+    const o=$('all').checked?{acceptAllDevices:true}:{filters:[{namePrefix:'Hello Fairy'}]};
+    o.optionalServices=[svc];
+    const dev=await navigator.bluetooth.requestDevice(o);
+    dev.addEventListener('gattserverdisconnected',()=>{ch=null;halt();$('st').textContent='Disconnected'});
+    const s=await (await dev.gatt.connect()).getPrimaryService(svc);
+    ch=await s.getCharacteristic(CHAR);
+    $('st').textContent='Connected: '+dev.name;log('Connected. Try Off, then On.');
+  }catch(e){log('Connect failed: '+e.message+'\nIf the device is listed but this fails, paste its service ID from nRF Connect above.')}
+}
+async function power(on){halt();try{await send([0xAA,2,1,on?1:0]);log(on?'On sent':'Off sent')}catch(e){log(e.message)}}
+async function setColor(){halt();const [h,s]=hexHue($('col').value);try{await hsv(h,s,bri())}catch(e){log(e.message)}}
+async function preset(){
+  halt();
+  try{
+    const v=bri();
+    await send([0xAA,3,4,2,(+$('pn').value)&255,v>>8,v&255]);
+    await send([0xAA,0x0C,1,Math.min(100,+$('spd').value*10)]);
+    log('Preset '+$('pn').value+' sent');
+  }catch(e){log(e.message)}
+}
+
+let an=null,fb=null;
+async function mic(){
+  if(an)return;
+  const st=await navigator.mediaDevices.getUserMedia({audio:true});
+  const ac=new AudioContext(),src=ac.createMediaStreamSource(st);
+  an=ac.createAnalyser();an.fftSize=256;src.connect(an);fb=new Uint8Array(an.frequencyBinCount);
+}
+function loud(){an.getByteFrequencyData(fb);let s=0;for(let i=0;i<4;i++)s+=fb[i];return s/4/255}
+const tri=p=>p<.5?p*2:(1-p)*2;
+const ANIMS={
+  rainbow:t=>[t*60,1000,bri()],
+  breathe:(t,b)=>[b[0],b[1]||1000,bri()*(.15+.85*(.5+.5*Math.sin(t*2)))],
+  police:t=>[Math.floor(t*4)%2?240:0,1000,bri()],
+  candle:()=>[22+Math.random()*14,950,bri()*(.4+Math.random()*.6)],
+  party:t=>[Math.floor(t*1.5)*137,1000,bri()],
+  fire:(t,b,S)=>{S.f=(S.f??.7)*.55+Math.random()*.45;return [4+S.f*26,1000,bri()*(.2+.8*S.f)]},
+  heartbeat:(t,b)=>{const p=(t*.9)%1,g=(c,w)=>Math.exp(-(((p-c)/w)**2));return [b[0],b[1]||1000,bri()*(.1+.9*Math.max(g(.1,.05),.7*g(.3,.06)))]},
+  aurora:t=>[200+80*Math.sin(t*.4),950,bri()*(.6+.4*Math.sin(t*.9+1))],
+  ocean:t=>[200+25*Math.sin(t*.7),900,bri()*(.35+.65*(.5+.5*Math.sin(t*1.2)))],
+  sunrise:t=>{const u=tri((t/20)%1);return [2+u*48,1000-u*250,bri()*(.3+.7*u)]},
+  thunder:(t,b,S)=>{
+    S.c=S.c||0;S.n=S.n||0;
+    if(S.n>0){S.n--;if(!S.n)S.c=5;return [220,120,bri()]}
+    if(S.c>0)S.c--;else if(Math.random()<.03)S.n=1+Math.floor(Math.random()*3);
+    return [255,900,bri()*.15]},
+  christmas:t=>{const s=Math.sin(t*1.5);return [s>0?0:120,1000,bri()*(.15+.85*Math.abs(s))]},
+  halloween:t=>{const s=Math.sin(t*1.1);return [s>0?28:275,1000,bri()*(.15+.85*Math.abs(s))*(.85+.15*Math.random())]},
+  disco:t=>{const p=(t*1.2)%1;return [Math.floor(t*1.2)*137,1000,bri()*(1-.7*p)]},
+  shimmer:(t,b,S)=>{S.v=(S.v??.6)*.5+Math.random()*.5;return [b[0],b[1]||1000,bri()*(.25+.75*S.v)]},
+  drift:(t,b)=>[b[0]+70*Math.sin(t*.5),b[1]||1000,bri()],
+  pulse:t=>[t*40,1000,bri()*(.2+.8*(.5+.5*Math.sin(t*2)))],
+  sound:(t,b,S)=>{const l=Math.min(1,loud()*1.6);S.l=Math.max(l,(S.l||0)*.8);return [t*30+S.l*140,1000,bri()*(.08+.92*S.l)]}
+};
+$('anims').innerHTML=Object.keys(ANIMS).map(k=>`<button onclick="play('${k}')">${k[0].toUpperCase()+k.slice(1)}</button>`).join('');
+async function play(n){
+  if(!ch)return log('Not connected. Tap Connect first.');
+  const id=++run,t0=performance.now(),b=hexHue($('col').value),S={};
+  try{
+    if(n==='sound')await mic();
+    await send([0xAA,2,1,1]);
+  }catch(e){return log(e.name==='NotAllowedError'?'Microphone blocked. Allow it in Chrome site settings.':e.message)}
+  log('Playing '+n);
+  while(id===run&&ch){
+    const t=(performance.now()-t0)/1000*(+$('spd').value/4);
+    try{await hsv(...ANIMS[n](t,b,S))}catch(e){log('Write failed: '+e.message);break}
+    await sleep(80);
+  }
+}
+</script>
+</body></html>
