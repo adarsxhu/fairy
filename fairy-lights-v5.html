@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#17132b">
+<title>Fairy lights controller</title>
+<style>
+:root{--bg:#17132b;--sf:#231d42;--bt:#352c60;--ink:#f4f0ff;--mu:#aaa3cc;--ac:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;padding:18px 16px 40px;background:var(--bg);color:var(--ink);font:16px/1.45 ui-rounded,"Segoe UI",system-ui,sans-serif;max-width:460px;margin-inline:auto}
+h1{font-size:22px;margin:4px 0 14px}
+h2{font-size:15px;margin:0 0 10px;color:var(--mu);font-weight:600}
+#glow{--c:hsl(40 100% 60%);display:flex;justify-content:space-between;margin:0 4px 20px}
+#glow i{width:18px;height:18px;border-radius:50%;background:var(--c);box-shadow:0 0 14px 4px var(--c);transition:background .08s}
+#glow i:nth-child(odd){transform:translateY(7px)}
+section{background:var(--sf);border-radius:16px;padding:14px;margin-bottom:12px}
+button{font:inherit;background:var(--bt);color:var(--ink);border:0;border-radius:12px;padding:13px;min-height:48px}
+button.go{background:var(--ac);color:#2a1f00;font-weight:600}
+button:focus-visible,input:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+.g{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.g3{grid-template-columns:repeat(3,1fr)}.g3 button{padding:12px 4px;font-size:15px}
+.w{width:100%;margin-top:8px}
+label{display:block;color:var(--mu);font-size:14px;margin-top:12px}
+input[type=range]{width:100%;accent-color:var(--ac)}
+input[type=color]{width:100%;height:48px;border:0;background:none;padding:0}
+input[type=text],input[type=number]{width:100%;padding:11px;border-radius:10px;border:1px solid var(--bt);background:var(--bg);color:var(--ink);font:inherit}
+#st{margin-left:8px;color:var(--mu)}
+#log{position:sticky;bottom:0;background:var(--bg);padding:8px 0;max-height:32vh;overflow:auto;font:12px/1.4 ui-monospace,monospace;color:var(--mu);white-space:pre-wrap;min-height:3em;border-top:1px solid var(--bt)}
+</style></head><body>
+<h1>Fairy lights</h1>
+<div id="glow"></div>
+
+<section><h2>Connection</h2>
+<button class="go" onclick="connect()">Connect</button><span id="st">Not connected</span>
+<label><input type="checkbox" id="all"> Show all Bluetooth devices</label>
+<label>Service ID (only if connecting fails)<input type="text" id="svc" placeholder="49535343-fe7d-4ae5-8fa9-9fafd205e455"></label>
+</section>
+
+<section><h2>Basics</h2>
+<div class="g"><button onclick="power(0)">Off</button><button onclick="power(1)">On</button></div>
+<label>Color (also used by Breathe)<input type="color" id="col" value="#ff3fa4"></label>
+<button class="w" onclick="setColor()">Set color</button>
+<label>Brightness<input type="range" id="bri" min="1" max="100" value="80"></label>
+</section>
+
+<section><h2>Custom animations</h2>
+<div class="g g3" id="anims"></div>
+<button class="w" onclick="halt()">Stop animation</button>
+<label>Speed<input type="range" id="spd" min="1" max="10" value="4"></label>
+</section>
+
+<section><h2>Built-in animations</h2>
+<label>Preset number<input type="number" id="pn" min="0" max="255" value="1"></label>
+<button class="w" onclick="preset()">Play preset</button>
+<div class="g" style="margin-top:8px"><button onclick="pstep(-1)">Prev</button><button onclick="pstep(1)">Next</button></div>
+</section>
+
+<section><h2>Per-bulb animations (experimental)</h2>
+<label>Number of bulbs<input type="number" id="nb" min="2" max="300" value="50"></label>
+<button class="w" onclick="testBulbs()">Test: every 5th bulb red</button>
+<label><input type="checkbox" id="mo" checked> Send motion messages (untick if the test looks wrong)</label>
+<div class="g g3" id="banims" style="margin-top:10px"></div>
+</section>
+
+<section><h2>Diagnostics</h2>
+<button class="w" onclick="info()">Ask lights for info</button>
+<div class="g" style="margin-top:8px"><button onclick="tA()">Test A: 5 bulbs</button><button onclick="tB()">Test B: long write</button></div>
+<label>Send hex<input type="text" id="hx" placeholder="AA 02 01 01"></label>
+<label><input type="checkbox" id="ck" checked> Add checksum automatically</label>
+<button class="w" onclick="sendHex()">Send hex</button>
+</section>
+
+<div id="log"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const CHAR='49535343-8841-43f4-a8d4-ecbe34729bb3',SVC='49535343-fe7d-4ae5-8fa9-9fafd205e455';
+let ch=null,run=0;
+$('glow').innerHTML='<i></i>'.repeat(12);
+const log=m=>{const L=$('log');L.textContent=(m+'\n'+L.textContent).split('\n').slice(0,16).join('\n')};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const bri=()=>+$('bri').value*10;
+const halt=()=>{run++};
+
+function pkt(a){return new Uint8Array([...a,a.reduce((x,y)=>x+y,0)&255])}
+async function send(a){
+  if(!ch)throw Error('Not connected. Tap Connect first.');
+  const d=pkt(a);
+  if(ch.properties.writeWithoutResponse)await ch.writeValueWithoutResponse(d);
+  else await ch.writeValue(d);
+}
+async function hsv(h,s,v){
+  h=((Math.round(h)%360)+360)%360;s=Math.round(s);v=Math.max(0,Math.min(1000,Math.round(v)));
+  $('glow').style.setProperty('--c',`hsl(${h} ${s/10}% ${20+v/25}%)`);
+  await send([0xAA,3,7,1,h>>8,h&255,s>>8,s&255,v>>8,v&255]);
+}
+function hexHue(x){
+  const r=parseInt(x.slice(1,3),16)/255,g=parseInt(x.slice(3,5),16)/255,b=parseInt(x.slice(5,7),16)/255;
+  const mx=Math.max(r,g,b),d=mx-Math.min(r,g,b);let h=0;
+  if(d){h=mx==r?((g-b)/d)%6:mx==g?(b-r)/d+2:(r-g)/d+4;h*=60;if(h<0)h+=360}
+  return [h,mx?d/mx*1000:0];
+}
+
+async function connect(){
+  try{
+    if(!navigator.bluetooth)return log('Web Bluetooth is not available here. Open this page in Chrome on Android, over https.');
+    const svc=($('svc').value.trim()||SVC).toLowerCase();
+    const o=$('all').checked?{acceptAllDevices:true}:{filters:[{namePrefix:'Hello Fairy'}]};
+    o.optionalServices=[svc];
+    const dev=await navigator.bluetooth.requestDevice(o);
+    dev.addEventListener('gattserverdisconnected',()=>{ch=null;halt();$('st').textContent='Disconnected'});
+    const s=await (await dev.gatt.connect()).getPrimaryService(svc);
+    ch=await s.getCharacteristic(CHAR);try{const nc=await s.getCharacteristic('49535343-1e4d-4bd9-ba61-23c647249616');await nc.startNotifications();nc.addEventListener('characteristicvaluechanged',e=>log('rx '+hex(new Uint8Array(e.target.value.buffer))))}catch(e){log('No notifications: '+e.message)}
+    $('st').textContent='Connected: '+dev.name;log('Connected. Try Off, then On.');
+  }catch(e){log('Connect failed: '+e.message+'\nIf the device is listed but this fails, paste its service ID from nRF Connect above.')}
+}
+async function power(on){halt();try{await send([0xAA,2,1,on?1:0]);log(on?'On sent':'Off sent')}catch(e){log(e.message)}}
+async function setColor(){halt();const [h,s]=hexHue($('col').value);try{await hsv(h,s,bri())}catch(e){log(e.message)}}
+async function preset(){
+  halt();
+  try{
+    const v=bri();
+    await send([0xAA,3,4,2,(+$('pn').value)&255,v>>8,v&255]);
+    await send([0xAA,0x0C,1,Math.min(100,+$('spd').value*10)]);
+    log('Preset '+$('pn').value+' sent');
+  }catch(e){log(e.message)}
+}
+
+let an=null,fb=null;
+async function mic(){
+  if(an)return;
+  const st=await navigator.mediaDevices.getUserMedia({audio:true});
+  const ac=new AudioContext(),src=ac.createMediaStreamSource(st);
+  an=ac.createAnalyser();an.fftSize=256;src.connect(an);fb=new Uint8Array(an.frequencyBinCount);
+}
+function loud(){an.getByteFrequencyData(fb);let s=0;for(let i=0;i<4;i++)s+=fb[i];return s/4/255}
+const tri=p=>p<.5?p*2:(1-p)*2;
+const ANIMS={
+  rainbow:t=>[t*60,1000,bri()],
+  breathe:(t,b)=>[b[0],b[1]||1000,bri()*(.15+.85*(.5+.5*Math.sin(t*2)))],
+  police:t=>[Math.floor(t*4)%2?240:0,1000,bri()],
+  candle:()=>[22+Math.random()*14,950,bri()*(.4+Math.random()*.6)],
+  party:t=>[Math.floor(t*1.5)*137,1000,bri()],
+  fire:(t,b,S)=>{S.f=(S.f??.7)*.55+Math.random()*.45;return [4+S.f*26,1000,bri()*(.2+.8*S.f)]},
+  heartbeat:(t,b)=>{const p=(t*.9)%1,g=(c,w)=>Math.exp(-(((p-c)/w)**2));return [b[0],b[1]||1000,bri()*(.1+.9*Math.max(g(.1,.05),.7*g(.3,.06)))]},
+  aurora:t=>[200+80*Math.sin(t*.4),950,bri()*(.6+.4*Math.sin(t*.9+1))],
+  ocean:t=>[200+25*Math.sin(t*.7),900,bri()*(.35+.65*(.5+.5*Math.sin(t*1.2)))],
+  sunrise:t=>{const u=tri((t/20)%1);return [2+u*48,1000-u*250,bri()*(.3+.7*u)]},
+  thunder:(t,b,S)=>{
+    S.c=S.c||0;S.n=S.n||0;
+    if(S.n>0){S.n--;if(!S.n)S.c=5;return [220,120,bri()]}
+    if(S.c>0)S.c--;else if(Math.random()<.03)S.n=1+Math.floor(Math.random()*3);
+    return [255,900,bri()*.15]},
+  christmas:t=>{const s=Math.sin(t*1.5);return [s>0?0:120,1000,bri()*(.15+.85*Math.abs(s))]},
+  halloween:t=>{const s=Math.sin(t*1.1);return [s>0?28:275,1000,bri()*(.15+.85*Math.abs(s))*(.85+.15*Math.random())]},
+  disco:t=>{const p=(t*1.2)%1;return [Math.floor(t*1.2)*137,1000,bri()*(1-.7*p)]},
+  shimmer:(t,b,S)=>{S.v=(S.v??.6)*.5+Math.random()*.5;return [b[0],b[1]||1000,bri()*(.25+.75*S.v)]},
+  drift:(t,b)=>[b[0]+70*Math.sin(t*.5),b[1]||1000,bri()],
+  pulse:t=>[t*40,1000,bri()*(.2+.8*(.5+.5*Math.sin(t*2)))],
+  sound:(t,b,S)=>{const l=Math.min(1,loud()*1.6);S.l=Math.max(l,(S.l||0)*.8);return [t*30+S.l*140,1000,bri()*(.08+.92*S.l)]}
+};
+Object.assign(ANIMS,{
+  aircraft:t=>{const p=(t*.7)%1;return [0,0,bri()*((p<.08||(p>.16&&p<.24))?1:0)]},
+  blink:(t,b)=>[b[0],b[1]||1000,Math.floor(t*2)%2?bri():0],
+  double_blink:(t,b)=>{const p=(t*.8)%1;return [b[0],b[1]||1000,(p<.12||(p>.22&&p<.34))?bri():0]},
+  sos:t=>{let u=(t*5)%34,on=1;for(const d of [1,1,1,1,1,3,3,1,3,1,3,3,1,1,1,1,1,7]){if(u<d)break;u-=d;on^=1}return [0,0,on?bri():0]},
+  ambulance:t=>[0,Math.floor(t*3)%2?1000:0,bri()],
+  lava:t=>[355+30*Math.sin(t*.4),1000,bri()*(.45+.55*(.5+.5*Math.sin(t*.8)))],
+  forest:t=>[110+30*Math.sin(t*.35),950,bri()*(.5+.5*(.5+.5*Math.sin(t*.7)))],
+  galaxy:t=>[270+50*Math.sin(t*.3),950,bri()*(.5+.5*(.5+.5*Math.sin(t*.9+1)))],
+  ice:(t,b,S)=>{S.v=(S.v??.7)*.6+Math.random()*.4;return [190+10*Math.sin(t),150+300*S.v,bri()*(.5+.5*S.v)]},
+  neon:t=>[[320,180,60,280][Math.floor(t/1.5)%4],1000,bri()],
+  color_jump:t=>[Math.floor(t*2)*47,1000,bri()],
+  warm_glow:t=>[28,700,bri()*(.35+.65*(.5+.5*Math.sin(t*.8)))],
+  mood:t=>[t*6,900,bri()*.8],
+  ember:(t,b,S)=>{S.f=(S.f??.5)*.85+Math.random()*.15;return [8+S.f*12,1000,bri()*(.12+.5*S.f)]},
+  soft_blink:(t,b)=>[b[0],b[1]||1000,bri()*(Math.sin(t*3)>0?1:.1)],
+  rgb_steps:t=>[[0,120,240][Math.floor(t*1.5)%3],1000,bri()],
+  pastel:t=>[t*25,350,bri()]
+});
+const lab=k=>(k[0].toUpperCase()+k.slice(1)).replace(/_/g,' ');
+$('anims').innerHTML=Object.keys(ANIMS).map(k=>`<button onclick="play('${k}')">${lab(k)}</button>`).join('');
+async function play(n){
+  if(!ch)return log('Not connected. Tap Connect first.');
+  const id=++run,t0=performance.now(),b=hexHue($('col').value),S={};
+  try{
+    if(n==='sound')await mic();
+    await send([0xAA,2,1,1]);
+  }catch(e){return log(e.name==='NotAllowedError'?'Microphone blocked. Allow it in Chrome site settings.':e.message)}
+  log('Playing '+n);
+  while(id===run&&ch){
+    const t=(performance.now()-t0)/1000*(+$('spd').value/4);
+    try{await hsv(...ANIMS[n](t,b,S))}catch(e){log('Write failed: '+e.message);break}
+    await sleep(80);
+  }
+}
+
+/* Per-bulb: one hue code (0-175) per bulb, 254 = off, 255 = white */
+const H=d=>Math.floor((((d%360)+360)%360)/360*175),OFF=254,WHT=255;
+const NB=()=>Math.max(2,Math.min(300,+$('nb').value||50));
+const MOT=v=>[0xAA,0xD0,4,v,0x64,Math.min(100,+$('spd').value*10),1];
+async function raw(d){if(ch.properties.writeWithoutResponse)await ch.writeValueWithoutResponse(d);else await ch.writeValue(d)}
+async function frame(a){
+  const mo=$('mo').checked;
+  if(mo)await send(MOT(0));
+  for(let s=0;s<a.length;s+=80){
+    const e=Math.min(a.length,s+80),m=[0xAA,0xDA,(e-s)*3+1,1];
+    for(let i=s;i<e;i++)m.push(i>>8,i&255,a[i]);
+    const d=pkt(m);
+    for(let k=0;k<d.length;k+=20){await raw(d.slice(k,k+20));await sleep(12)}
+  }
+  if(mo)await send(MOT(2));
+}
+const B={
+  follow:(i,N,t,h)=>i===Math.floor(t*6)%N?h:OFF,
+  comet:(i,N,t,h)=>{const d=(Math.floor(t*6)%N-i+N)%N;return d===0?WHT:d<6?h:OFF},
+  flow:(i,N,t)=>H(i/N*720-t*70),
+  color_flow:(i,N,t)=>Math.floor(i/5-t*3)%2?H(0):H(240),
+  blink_each:(i,N,t,h,S)=>((t*.8+S.p[i])%1)<.35?H(S.p[i]*360):OFF,
+  aircraft_bulbs:(i,N,t)=>{if(i%8)return OFF;const p=(t*.5+i*.137)%1;return p<.15||(p>.3&&p<.45)?WHT:OFF},
+  alternate:(i,N,t,h)=>(i+Math.floor(t*2))%2?h:OFF,
+  theater:(i,N,t,h)=>(i+Math.floor(t*4))%3?OFF:h,
+  bounce:(i,N,t,h)=>Math.abs(i-tri((t*.12)%1)*(N-1))<2.5?h:OFF,
+  fill:(i,N,t,h)=>i<tri((t*.1)%1)*N?h:OFF,
+  stars:()=>Math.random()<.1?WHT:OFF,
+  sparkle:(i,N,t,h)=>Math.random()<.07?WHT:h,
+  wave:(i,N,t)=>H(200+70*Math.sin(i*.25-t*2.5)),
+  candy:(i,N,t)=>Math.floor(i/4+t*3)%2?H(0):WHT,
+  xmas_bulbs:(i,N,t)=>(i+Math.floor(t*1.5))%2?H(0):H(120),
+  police_split:(i,N,t)=>(Math.floor(t*3)%2===(i<N/2?0:1))?H(0):H(240),
+  random_colors:(i,N,t,h,S)=>{const k=Math.floor(t);if(S.k!==k){S.k=k;S.u=Array.from({length:N},()=>Math.random()*360)}return H(S.u[i])},
+  rainbow_blink:(i,N,t)=>(Math.floor(t*2)+i)%2?H(i/N*360):OFF,
+  snake:(i,N,t)=>{const d=(Math.floor(t*6)%N-i+N)%N;return d<8?H(t*60+d*8):OFF},
+  two_dots:(i,N,t,h)=>{const p=Math.floor(t*6)%N;return i===p||i===N-1-p?h:OFF},
+  scanner:(i,N,t,h)=>{const p=Math.round(tri((t*.15)%1)*(N-1));return i===p?WHT:Math.abs(i-p)<3?h:OFF},
+  meteor:(i,N,t,h,S)=>{const c=Math.floor(t*6/N);if(S.c!==c){S.c=c;S.h=Math.random()*360}const d=Math.floor(t*6)%N-i;return d===0?WHT:d>0&&d<7?H(S.h):OFF},
+  pulse_out:(i,N,t,h)=>Math.abs(i-N/2)<((t*.5)%1)*N/2?h:OFF,
+  gradient_flow:(i,N,t)=>H(20+40*Math.sin(i*.08-t*1.5))
+};
+const rnd=Math.random;
+const dropAt=(S,k,i,len)=>{for(const d of S[k]||[]){const j=Math.floor(d.p)-i;if(j>=0&&j<len)return [j,d]}};
+function drops(S,k,t,N,rate,spd){
+  const dt=Math.min(.5,t-(S[k+'t']??t));S[k+'t']=t;
+  const D=S[k]=(S[k]||[]).filter(d=>d.p<N+8);
+  D.forEach(d=>d.p+=d.v*dt);
+  if(rnd()<rate*dt&&D.length<40)D.push({p:0,v:spd*(.6+rnd()*.8),h:rnd()*360});
+}
+Object.assign(B,{
+  step4:(i,N,t,h)=>i%4===Math.floor(t*3)%4?h:OFF,
+  step6:(i,N,t,h)=>i%6===Math.floor(t*4)%6?h:OFF,
+  count_up:(i,N,t,h)=>i<Math.floor((t*8)%(N+10))?h:OFF,
+  count_down:(i,N,t,h)=>i<N-Math.floor((t*8)%(N+10))?h:OFF,
+  count_rainbow:(i,N,t)=>i<Math.floor((t*8)%(N+10))?H(i/N*360):OFF,
+  close_in:(i,N,t,h)=>Math.min(i,N-1-i)<Math.floor((t*6)%(N/2+8))?h:OFF,
+  open_out:(i,N,t,h)=>Math.abs(i-(N-1)/2)<Math.floor((t*6)%(N/2+8))?h:OFF,
+  rainbow_rev:(i,N,t)=>H(i/N*720+t*70),
+  rainbow_dots:(i,N,t)=>((i-Math.floor(t*6))%6+6)%6===0?H(i*12+t*40):OFF,
+  rainbow_stripes:(i,N,t)=>H(Math.floor((i+t*6)/5)*40),
+  marquee:(i,N,t,h)=>((i-Math.floor(t*6))%6+6)%6===0?h:OFF,
+  rain:(i,N,t,h,S)=>{if(!i)drops(S,'r',t,N,3,14);const r=dropAt(S,'r',i,4);return r?(r[0]?H(200):WHT):OFF},
+  rain_color:(i,N,t,h,S)=>{if(!i)drops(S,'c',t,N,4,14);const r=dropAt(S,'c',i,4);return r?(r[0]?H(r[1].h):WHT):OFF},
+  rainbow_rain:(i,N,t,h,S)=>{if(!i)drops(S,'w',t,N,5,16);const r=dropAt(S,'w',i,5);return r?H(r[1].h+t*40):OFF},
+  meteor_shower:(i,N,t,h,S)=>{if(!i)drops(S,'m',t,N,1.2,28);const r=dropAt(S,'m',i,8);return r?(r[0]?H(r[1].h):WHT):OFF},
+  stack:(i,N,t,h,S)=>{
+    if(!i){
+      const dt=Math.min(.5,t-(S.st??t));S.st=t;
+      if(S.n===undefined){S.n=0;S.dp=0;S.hu=[];S.hv=rnd()*360}
+      if(S.n>=N){S.w=(S.w||0)+dt;if(S.w>1.2){S.n=0;S.w=0;S.dp=0;S.hu=[]}}
+      else{S.dp+=dt*18;if(S.dp>=N-1-S.n){S.hu[N-1-S.n]=S.hv;S.n++;S.dp=0;S.hv=rnd()*360}}
+    }
+    return S.hu[i]!==undefined?H(S.hu[i]):(Math.floor(S.dp)===i&&S.n<N?H(S.hv):OFF);
+  },
+  eiffel:()=>rnd()<.15?WHT:H(32),
+  glitter:()=>rnd()<.25?WHT:OFF,
+  gold_glitter:()=>{const r=rnd();return r<.12?WHT:r<.3?H(38):OFF},
+  camera_flash:(i,N,t,h,S)=>{
+    if(!i){if(S.fl>0)S.fl--;else if(rnd()<.4){S.fc=Math.floor(rnd()*N);S.fr=2+Math.floor(rnd()*5);S.fl=1}}
+    return S.fl>0&&Math.abs(i-S.fc)<=S.fr?WHT:OFF;
+  },
+  sparkle_rainbow:(i,N,t)=>rnd()<.08?WHT:H(i/N*720-t*70),
+  confetti:()=>rnd()<.18?H(rnd()*360):OFF,
+  fireworks:(i,N,t,h,S)=>{
+    if(!i){
+      const dt=Math.min(.5,t-(S.ft??t));S.ft=t;
+      if(!S.b||S.b.r>16){S.w=(S.w||0)+dt;if(S.w>.8||!S.b){S.w=0;S.b={c:Math.floor(rnd()*N),r:0,h:rnd()*360}}}
+      else S.b.r+=dt*14;
+    }
+    const b=S.b;if(!b||b.r>16)return OFF;const d=Math.abs(i-b.c);
+    return d<=b.r&&d>b.r-3?H(b.h):d<b.r-3&&rnd()<.15?WHT:OFF;
+  }
+});
+$('banims').innerHTML=Object.keys(B).map(k=>`<button onclick="playB('${k}')">${lab(k)}</button>`).join('');
+async function testBulbs(){
+  halt();
+  try{await frame(Array.from({length:NB()},(_,i)=>i%5?OFF:H(0)));log('Test sent. Every 5th bulb should be red, the rest off.')}
+  catch(e){log(e.message)}
+}
+async function playB(n){
+  if(!ch)return log('Not connected. Tap Connect first.');
+  const id=++run,t0=performance.now(),N=NB(),h=H(hexHue($('col').value)[0]),S={p:Array.from({length:N},Math.random)};
+  try{await send([0xAA,2,1,1])}catch(e){return log(e.message)}
+  log('Playing '+n+' on '+N+' bulbs');
+  while(id===run&&ch){
+    const t=(performance.now()-t0)/1000*(+$('spd').value/4);
+    try{await frame(Array.from({length:N},(_,i)=>B[n](i,N,t,h,S)))}catch(e){log('Write failed: '+e.message);break}
+    await sleep(20);
+  }
+}
+
+const hex=a=>[...a].map(x=>x.toString(16).padStart(2,'0')).join(' ');
+function pstep(d){$('pn').value=Math.max(0,Math.min(255,(+$('pn').value||0)+d));preset()}
+async function info(){try{const d=pkt([0xAA,0,0]);await raw(d);log('tx '+hex(d))}catch(e){log(e.message)}}
+async function sendHex(){
+  try{
+    const a=($('hx').value.match(/[0-9a-f]{2}/gi)||[]).map(x=>parseInt(x,16));
+    const d=$('ck').checked?pkt(a):new Uint8Array(a);
+    for(let k=0;k<d.length;k+=20){await raw(d.slice(k,k+20));await sleep(12)}
+    log('tx '+hex(d));
+  }catch(e){log(e.message)}
+}
+async function tA(){
+  halt();
+  try{const m=[0xAA,0xDA,16,1];for(let i=0;i<5;i++)m.push(0,i,0);const d=pkt(m);await raw(d);log('tx '+hex(d)+'\nTest A: bulbs 1-5 should turn red.')}
+  catch(e){log(e.message)}
+}
+async function tB(){
+  halt();
+  try{
+    const n=Math.min(NB(),80),m=[0xAA,0xDA,n*3+1,1];
+    for(let i=0;i<n;i++)m.push(i>>8,i&255,i%5?OFF:0);
+    const d=pkt(m);
+    if(ch.properties.write)await ch.writeValueWithResponse(d);else await ch.writeValue(d);
+    log('tx '+d.length+' bytes in one write. Test B: every 5th bulb should be red.');
+  }catch(e){log('Test B failed: '+e.message)}
+}
+</script>
+</body></html>
